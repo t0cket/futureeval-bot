@@ -1,0 +1,29 @@
+name: Test bot
+
+# Manual smoke test on the bot-testing-area tournament (never on live tournament questions).
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Forecast without publishing"
+        type: boolean
+        default: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Run bot on test questions
+        run: python bot.py --mode test ${{ inputs.dry_run && '--dry-run' || '' }}
+        env:
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
+          ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}

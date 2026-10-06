@@ -1,0 +1,6 @@
+forecasting-tools==0.3.4
+# Pinned to the versions tested with this bot (litellm has had compromised releases).
+litellm==1.104.0
+asknews==0.14.5
+python-dotenv>=1.0,<2
+requests>=2.32,<3
