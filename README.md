@@ -38,11 +38,15 @@ Numeric, date and conditional questions use the template's prompts with the same
    - Push this folder to a new **public** repository. Public repos get unlimited Actions minutes; the 20-minute schedule would exceed a private repo's free quota.
    - Under Settings → Secrets and variables → Actions, add `METACULUS_TOKEN`, `OPENROUTER_API_KEY` and, if you have them, `ASKNEWS_CLIENT_ID` and `ASKNEWS_SECRET`.
 5. **Test**
-   - Run Actions → Test bot → Run workflow.
+   - Run Actions → Test bot → Run workflow (or `python bot.py --mode test` locally). It forecasts one open binary, one multiple-choice and one numeric question from `bot-testing-area`.
    - On Metaculus, use "Switch to bot account" to check that forecasts landed on the bot-testing-area questions.
    - After that, the "Forecast on tournament questions" workflow runs every 20 minutes.
 
 To skip MiniBench, set the repository variable `INCLUDE_MINIBENCH` to `0`. To change the number of samples per question, set `PREDICTIONS_PER_QUESTION`.
+
+## Cost logging
+
+Every LLM call is logged with its input, output and reasoning tokens, stop reason (`length` means `max_tokens` cut it off), cost and duration. Each run ends by logging the OpenRouter credit it used. Use that line for spend: the cost in forecasting-tools' own summary can count a call twice.
 
 ## Local runs
 
@@ -52,3 +56,5 @@ python -m venv .venv
 cp .env.template .env                           # then fill in your keys
 .venv/Scripts/python bot.py --mode test --dry-run
 ```
+
+`.env` is found by searching upward from `bot.py`, so a `.env` in this folder also serves any git worktree under it.

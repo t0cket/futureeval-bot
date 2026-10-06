@@ -8,7 +8,7 @@ Builds on Metaculus's official Fall 2026 template bot and changes three things:
 
 Usage:
     python bot.py                      # seasonal tournament (+ MiniBench unless INCLUDE_MINIBENCH=0)
-    python bot.py --mode test          # bot-testing-area questions, safe for smoke tests
+    python bot.py --mode test          # one bot-testing-area question per main type, safe for smoke tests
     python bot.py --mode test --dry-run
 """
 import argparse
@@ -19,7 +19,9 @@ import sys
 from datetime import datetime
 
 import dotenv
+import litellm
 import requests
+from litellm.integrations.custom_logger import CustomLogger
 
 dotenv.load_dotenv()
 
@@ -30,6 +32,7 @@ from forecasting_tools import (  # noqa: E402  (env must be loaded first)
     MetaculusClient,
     MetaculusQuestion,
     MultipleChoiceQuestion,
+    NumericQuestion,
     PredictedOptionList,
     ReasonedPrediction,
     clean_indents,
@@ -49,6 +52,12 @@ PARSER_MODEL = os.getenv("PARSER_MODEL", "openrouter/anthropic/claude-haiku-4.5"
 PREDICTIONS_PER_QUESTION = int(os.getenv("PREDICTIONS_PER_QUESTION", "3"))
 INCLUDE_MINIBENCH = os.getenv("INCLUDE_MINIBENCH", "1") == "1"
 MIN_CREDITS_USD = float(os.getenv("MIN_CREDITS_USD", "1.0"))
+ASKNEWS_CONFIGURED = bool(os.getenv("ASKNEWS_CLIENT_ID") and os.getenv("ASKNEWS_SECRET"))
+
+TEST_TOURNAMENT = "bot-testing-area"
+# The test run forecasts one open question of each of these types, which covers both
+# custom prompts and numeric parsing at a fraction of the cost of the whole test set.
+TEST_QUESTION_TYPES = (BinaryQuestion, MultipleChoiceQuestion, NumericQuestion)
 
 MARKET_GUIDANCE = (
     "Use a listed prediction market only if it asks about essentially the same event with "
@@ -65,27 +74,23 @@ class CalibratedForecaster(FallTemplateBot2026):
     _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)
 
     async def run_research(self, question: MetaculusQuestion) -> str:
+        sources = {
+            "Web research": self._web_research(question),
+            "Related public forecasts": find_public_forecasts(
+                question, self.get_llm("parser", "llm")
+            ),
+        }
+        if ASKNEWS_CONFIGURED:  # an empty news section would read as "no news exists"
+            sources = {"News (AskNews)": self._news(question), **sources}
         async with self._concurrency_limiter:
-            news, web, markets = await asyncio.gather(
-                self._news(question),
-                self._web_research(question),
-                find_public_forecasts(question, self.get_llm("parser", "llm")),
-                return_exceptions=True,
-            )
+            results = await asyncio.gather(*sources.values(), return_exceptions=True)
         research = "\n\n".join(
-            f"## {title}\n{_section_text(body)}"
-            for title, body in [
-                ("News (AskNews)", news),
-                ("Web research", web),
-                ("Related public forecasts", markets),
-            ]
+            f"## {title}\n{_section_text(body)}" for title, body in zip(sources, results)
         )
         logger.info(f"Research for {question.page_url}:\n{research}")
         return research
 
     async def _news(self, question: MetaculusQuestion) -> str:
-        if not (os.getenv("ASKNEWS_CLIENT_ID") and os.getenv("ASKNEWS_SECRET")):
-            return ""
         return await AskNewsSearcher().get_formatted_news_async(question.question_text)
 
     async def _web_research(self, question: MetaculusQuestion) -> str:
@@ -201,24 +206,48 @@ def _section_text(body: str | BaseException) -> str:
     return body.strip() or "None found."
 
 
-def openrouter_credits_remaining() -> float | None:
-    """Credits left on the OpenRouter key, or None when the key has no limit."""
+class UsageLogger(CustomLogger):
+    """Logs every LLM call's tokens, stop reason, cost and duration.
+
+    Reasoning tokens show whether the effort setting reached the model, and a
+    "length" stop reason means max_tokens cut the answer off.
+    """
+
+    async def async_log_success_event(self, kwargs, response_obj, start_time, end_time):
+        usage = getattr(response_obj, "usage", None)
+        choices = getattr(response_obj, "choices", None)
+        if usage is None or not choices:
+            return
+        details = getattr(usage, "completion_tokens_details", None)
+        reasoning = getattr(details, "reasoning_tokens", None) or 0
+        logger.info(
+            f"LLM call {kwargs.get('model')}: {usage.prompt_tokens} in, "
+            f"{usage.completion_tokens} out ({reasoning} reasoning), "
+            f"stop={choices[0].finish_reason}, ${kwargs.get('response_cost') or 0:.4f}, "
+            f"{(end_time - start_time).total_seconds():.0f}s"
+        )
+
+
+def openrouter_key_status() -> dict | None:
+    """Usage and remaining credit of the OpenRouter key, or None if unavailable."""
     key = os.getenv("OPENROUTER_API_KEY")
     if not key:
         return None
-    response = requests.get(
-        "https://openrouter.ai/api/v1/key",
-        headers={"Authorization": f"Bearer {key}"},
-        timeout=15,
-    )
-    response.raise_for_status()
-    data = response.json()["data"]
-    logger.info(f"OpenRouter key usage so far: ${data.get('usage', 0):.2f}")
-    remaining = data.get("limit_remaining")
-    return None if remaining is None else float(remaining)
+    try:
+        response = requests.get(
+            "https://openrouter.ai/api/v1/key",
+            headers={"Authorization": f"Bearer {key}"},
+            timeout=15,
+        )
+        response.raise_for_status()
+        return response.json()["data"]
+    except requests.RequestException as e:  # a status check must not cost us a question window
+        logger.warning(f"Could not read OpenRouter key status: {e}")
+        return None
 
 
 def build_bot(publish: bool, skip_previously_forecasted: bool) -> CalibratedForecaster:
+    # Long timeouts: a call that times out is still billed, and then retried.
     return CalibratedForecaster(
         research_reports_per_question=1,
         predictions_per_research_report=PREDICTIONS_PER_QUESTION,
@@ -231,18 +260,26 @@ def build_bot(publish: bool, skip_previously_forecasted: bool) -> CalibratedFore
         llms={
             "default": GeneralLlm(
                 model=FORECAST_MODEL,
-                timeout=300,
+                timeout=600,
                 allowed_tries=2,
                 max_tokens=16000,
                 extra_body={"reasoning": {"effort": FORECAST_EFFORT}},
             ),
             "researcher": GeneralLlm(
-                model=RESEARCH_MODEL, timeout=300, allowed_tries=2, max_tokens=8000
+                model=RESEARCH_MODEL, timeout=600, allowed_tries=2, max_tokens=8000
             ),
             "parser": GeneralLlm(model=PARSER_MODEL, timeout=60, allowed_tries=3),
             "summarizer": GeneralLlm(model=PARSER_MODEL, timeout=60, allowed_tries=3),
         },
     )
+
+
+def test_questions(client: MetaculusClient) -> list[MetaculusQuestion]:
+    picked: dict[type, MetaculusQuestion] = {}
+    for question in client.get_all_open_questions_from_tournament(TEST_TOURNAMENT):
+        if type(question) in TEST_QUESTION_TYPES:
+            picked.setdefault(type(question), question)
+    return list(picked.values())
 
 
 def main() -> None:
@@ -256,32 +293,38 @@ def main() -> None:
 
     if not os.getenv("METACULUS_TOKEN"):
         sys.exit("METACULUS_TOKEN is not set (see README.md)")
-    remaining = openrouter_credits_remaining()
+    key_before = openrouter_key_status()
+    remaining = (key_before or {}).get("limit_remaining")
+    logger.info(f"OpenRouter credit remaining on the key: {remaining}")
     if remaining is not None and remaining < MIN_CREDITS_USD:
         logger.warning(f"Only ${remaining:.2f} of LLM credits left; skipping this run.")
         return
+    litellm.callbacks.append(UsageLogger())
 
     client = MetaculusClient()
     if args.mode == "test":
-        bot = build_bot(publish=not args.dry_run, skip_previously_forecasted=False)
-        tournaments = ["bot-testing-area"]
+        questions = test_questions(client)
     else:
-        bot = build_bot(publish=not args.dry_run, skip_previously_forecasted=True)
         tournaments = [client.CURRENT_AI_COMPETITION_ID]
         if INCLUDE_MINIBENCH:
             tournaments.append(client.CURRENT_MINIBENCH_ID)
+        questions = [
+            question
+            for tournament in tournaments
+            for question in client.get_all_open_questions_from_tournament(tournament)
+        ]
+    bot = build_bot(publish=not args.dry_run, skip_previously_forecasted=args.mode != "test")
+    # A single event loop: the class-level semaphore binds to the first loop that waits on it.
+    reports = asyncio.run(bot.forecast_questions(questions, return_exceptions=True))
 
-    reports = asyncio.run(forecast_all(bot, tournaments))
-    bot.log_report_summary(reports)
-
-
-async def forecast_all(bot: CalibratedForecaster, tournaments: list) -> list:
-    # One event loop for all tournaments: the class-level semaphore binds to the
-    # first loop that waits on it.
-    reports = []
-    for tournament in tournaments:
-        reports += await bot.forecast_on_tournament(tournament, return_exceptions=True)
-    return reports
+    key_after = openrouter_key_status()
+    if key_before and key_after:
+        # The cost in forecasting-tools' summary can double-count calls; this is the real spend.
+        logger.info(
+            f"OpenRouter credit used this run: ${key_after['usage'] - key_before['usage']:.2f} "
+            f"(key total ${key_after['usage']:.2f}, remaining {key_after.get('limit_remaining')})"
+        )
+    bot.log_report_summary(reports)  # raises if any question failed, so the run shows as failed
 
 
 if __name__ == "__main__":
