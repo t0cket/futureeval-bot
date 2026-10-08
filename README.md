@@ -40,7 +40,7 @@ Numeric, date and conditional questions use the template's prompts with the same
 5. **Test**
    - Run Actions → Test bot → Run workflow (or `python bot.py --mode test` locally). It forecasts one open binary, one multiple-choice and one numeric question from `bot-testing-area`.
    - On Metaculus, use "Switch to bot account" to check that forecasts landed on the bot-testing-area questions.
-   - After that, the "Forecast on tournament questions" workflow runs every 20 minutes.
+   - After that, the "Forecast on tournament questions" workflow checks for new questions every 15 minutes. Each run polls for about 5 hours, because GitHub drops many scheduled triggers.
 
 To skip MiniBench, set the repository variable `INCLUDE_MINIBENCH` to `0`. To change the number of samples per question, set `PREDICTIONS_PER_QUESTION`.
 
