@@ -3,14 +3,17 @@ name: Forecast on tournament questions
 on:
   workflow_dispatch:
   schedule:
-    # GitHub drops many scheduled runs (we saw one in 7 hours on a 20-minute cron), so each
-    # run polls for about 5 hours itself. The cron only has to fire once per run to keep
-    # coverage continuous; extra triggers wait in the concurrency queue.
+    # Backup only. GitHub drops most scheduled runs (2 of ~48 fired in a day), so each run
+    # polls for about 5 hours and then starts the next run itself (last step).
     - cron: "7,37 * * * *"
 
 concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write  # lets the last step start the next run
 
 jobs:
   forecast:
@@ -48,3 +51,11 @@ jobs:
           path: reports/
           if-no-files-found: ignore
           retention-days: 90
+      - name: Start the next run
+        # Runs started with the built-in token still trigger workflow_dispatch. The new run
+        # queues behind this one. To stop the bot, disable this workflow in the Actions tab.
+        if: ${{ !cancelled() }}
+        run: gh workflow run forecast.yaml --ref main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}

@@ -47,7 +47,10 @@ logger = logging.getLogger(__name__)
 
 FORECAST_MODEL = os.getenv("FORECAST_MODEL", "openrouter/anthropic/claude-opus-5.5")
 FORECAST_EFFORT = os.getenv("FORECAST_EFFORT", "high")
-RESEARCH_MODEL = os.getenv("RESEARCH_MODEL", "openrouter/anthropic/claude-opus-5.5:online")
+RESEARCH_MODEL = os.getenv("RESEARCH_MODEL", "openrouter/anthropic/claude-opus-5.5")
+# Exa search via OpenRouter's web plugin. Anthropic's native search pulled 55-95k tokens of results
+# into each research call ($0.30-0.49); 8 Exa results gave equally current, sourced briefs for ~$0.09.
+WEB_SEARCH_RESULTS = int(os.getenv("WEB_SEARCH_RESULTS", "8"))
 PARSER_MODEL = os.getenv("PARSER_MODEL", "openrouter/anthropic/claude-haiku-4.5")
 PREDICTIONS_PER_QUESTION = int(os.getenv("PREDICTIONS_PER_QUESTION", "3"))
 INCLUDE_MINIBENCH = os.getenv("INCLUDE_MINIBENCH", "1") == "1"
@@ -266,7 +269,13 @@ def build_bot(publish: bool, skip_previously_forecasted: bool) -> CalibratedFore
                 extra_body={"reasoning": {"effort": FORECAST_EFFORT}},
             ),
             "researcher": GeneralLlm(
-                model=RESEARCH_MODEL, timeout=600, allowed_tries=2, max_tokens=8000
+                model=RESEARCH_MODEL,
+                timeout=600,
+                allowed_tries=2,
+                max_tokens=8000,
+                extra_body={
+                    "plugins": [{"id": "web", "engine": "exa", "max_results": WEB_SEARCH_RESULTS}]
+                },
             ),
             "parser": GeneralLlm(model=PARSER_MODEL, timeout=60, allowed_tries=3),
             "summarizer": GeneralLlm(model=PARSER_MODEL, timeout=60, allowed_tries=3),

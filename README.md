@@ -8,7 +8,7 @@ For each new question:
 
 1. **Research.** Three sources run in parallel:
    - **News:** AskNews latest and historical news summaries
-   - **Web search:** Claude Opus 5.5 with live web search, reporting the latest developments, scheduled events before the resolution date, base rates, and whether the question is already nearly settled
+   - **Web search:** Claude Opus 5.5 reading the top 8 Exa web-search results (via OpenRouter's web plugin), reporting the latest developments, scheduled events before the resolution date, base rates, and whether the question is already nearly settled
    - **Related public forecasts:** matching Polymarket and Manifold markets, with current prices, volume and close dates. Search queries are written by Claude Haiku 4.5. Manifold markets with fewer than 10 traders are dropped.
 2. **Forecast.** Claude Opus 5.5 at high effort writes 3 independent forecasts from the same research. The binary and multiple-choice prompts ask for the time left, the status-quo outcome, a base rate with its reference class, and what related markets say. A market is used only if it asks about the same event with compatible criteria and timing.
 3. **Aggregate.** The 3 forecasts are combined with the template's standard aggregation (median for binary questions), then posted with the reasoning as a private comment.
