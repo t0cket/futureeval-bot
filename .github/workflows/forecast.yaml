@@ -41,7 +41,8 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
-          INCLUDE_MINIBENCH: ${{ vars.INCLUDE_MINIBENCH || '1' }}
+          INCLUDE_MINIBENCH: ${{ vars.INCLUDE_MINIBENCH || '0' }}
+          INCLUDE_MARKET_PULSE: ${{ vars.INCLUDE_MARKET_PULSE || '1' }}
           PREDICTIONS_PER_QUESTION: ${{ vars.PREDICTIONS_PER_QUESTION || '3' }}
       - name: Keep forecast reports
         if: always()

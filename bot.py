@@ -7,7 +7,7 @@ Builds on Metaculus's official Fall 2026 template bot and changes three things:
    market prices.
 
 Usage:
-    python bot.py                      # seasonal tournament (+ MiniBench unless INCLUDE_MINIBENCH=0)
+    python bot.py                      # seasonal tournament + Market Pulse (+ MiniBench if INCLUDE_MINIBENCH=1)
     python bot.py --mode test          # one bot-testing-area question per main type, safe for smoke tests
     python bot.py --mode test --dry-run
 """
@@ -15,8 +15,9 @@ import argparse
 import asyncio
 import logging
 import os
+import re
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import dotenv
 import litellm
@@ -53,7 +54,13 @@ RESEARCH_MODEL = os.getenv("RESEARCH_MODEL", "openrouter/anthropic/claude-opus-5
 WEB_SEARCH_RESULTS = int(os.getenv("WEB_SEARCH_RESULTS", "8"))
 PARSER_MODEL = os.getenv("PARSER_MODEL", "openrouter/anthropic/claude-haiku-4.5")
 PREDICTIONS_PER_QUESTION = int(os.getenv("PREDICTIONS_PER_QUESTION", "3"))
-INCLUDE_MINIBENCH = os.getenv("INCLUDE_MINIBENCH", "1") == "1"
+# MiniBench pays ~$17 of prize pool per question vs ~$115-250 for Market Pulse and the seasonal
+# tournament, at the same cost per forecast, so it is off while we pay for credits (D-019).
+INCLUDE_MINIBENCH = os.getenv("INCLUDE_MINIBENCH", "0") == "1"
+INCLUDE_MARKET_PULSE = os.getenv("INCLUDE_MARKET_PULSE", "1") == "1"
+# Market Pulse scores only the forecast standing at each question's close, so each question is
+# forecast when it opens (in case it resolves early) and refreshed once in this final window.
+MARKET_PULSE_REFRESH_HOURS = float(os.getenv("MARKET_PULSE_REFRESH_HOURS", "12"))
 MIN_CREDITS_USD = float(os.getenv("MIN_CREDITS_USD", "1.0"))
 ASKNEWS_CONFIGURED = bool(os.getenv("ASKNEWS_CLIENT_ID") and os.getenv("ASKNEWS_SECRET"))
 
@@ -206,7 +213,9 @@ class CalibratedForecaster(FallTemplateBot2026):
 def _section_text(body: str | BaseException) -> str:
     if isinstance(body, BaseException):
         return f"Unavailable ({type(body).__name__}: {body})"
-    return body.strip() or "None found."
+    # Nest the source's own headings under our "## <section>" heading; forecasting-tools
+    # mangles the research in the comment ("#" -> "[Hashtag]") when a "#" heading follows "##".
+    return re.sub(r"(?m)^(#{1,4}) ", r"##\1 ", body.strip()) or "None found."
 
 
 class UsageLogger(CustomLogger):
@@ -291,6 +300,42 @@ def test_questions(client: MetaculusClient) -> list[MetaculusQuestion]:
     return list(picked.values())
 
 
+def market_pulse_due(question: MetaculusQuestion, now: datetime) -> bool:
+    """Forecast unforecast questions, and refresh once inside the window before close."""
+    if not question.already_forecasted:
+        return True
+    if question.close_time is None:
+        return False
+    window_start = question.close_time - timedelta(hours=MARKET_PULSE_REFRESH_HOURS)
+    last = question.timestamp_of_my_last_forecast
+    return now >= window_start and (last is None or last < window_start)
+
+
+def tournament_questions(client: MetaculusClient) -> list[MetaculusQuestion]:
+    futureeval = [client.CURRENT_AI_COMPETITION_ID]
+    if INCLUDE_MINIBENCH:
+        futureeval.append(client.CURRENT_MINIBENCH_ID)
+    # FutureEval: one forecast per question.
+    questions = [
+        question
+        for tournament in futureeval
+        for question in client.get_all_open_questions_from_tournament(tournament)
+        if not question.already_forecasted
+    ]
+    if INCLUDE_MARKET_PULSE:
+        now = datetime.now(timezone.utc)
+        due = [
+            question
+            for question in client.get_all_open_questions_from_tournament(
+                client.CURRENT_MARKET_PULSE_ID
+            )
+            if market_pulse_due(question, now)
+        ]
+        logger.info(f"Market Pulse: {len(due)} questions due for a forecast or refresh")
+        questions += due
+    return questions
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -314,15 +359,9 @@ def main() -> None:
     if args.mode == "test":
         questions = test_questions(client)
     else:
-        tournaments = [client.CURRENT_AI_COMPETITION_ID]
-        if INCLUDE_MINIBENCH:
-            tournaments.append(client.CURRENT_MINIBENCH_ID)
-        questions = [
-            question
-            for tournament in tournaments
-            for question in client.get_all_open_questions_from_tournament(tournament)
-        ]
-    bot = build_bot(publish=not args.dry_run, skip_previously_forecasted=args.mode != "test")
+        questions = tournament_questions(client)
+    # Already-forecast questions are filtered above, per tournament.
+    bot = build_bot(publish=not args.dry_run, skip_previously_forecasted=False)
     # A single event loop: the class-level semaphore binds to the first loop that waits on it.
     reports = asyncio.run(bot.forecast_questions(questions, return_exceptions=True))
 

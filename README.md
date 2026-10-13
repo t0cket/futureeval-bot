@@ -42,7 +42,18 @@ Numeric, date and conditional questions use the template's prompts with the same
    - On Metaculus, use "Switch to bot account" to check that forecasts landed on the bot-testing-area questions.
    - After that, the "Forecast on tournament questions" workflow checks for new questions every 15 minutes. Each run polls for about 5 hours, because GitHub drops many scheduled triggers.
 
-To skip MiniBench, set the repository variable `INCLUDE_MINIBENCH` to `0`. To change the number of samples per question, set `PREDICTIONS_PER_QUESTION`.
+Repository variables:
+- `INCLUDE_MINIBENCH`: `1` adds MiniBench. It is off by default, because it pays far less prize money per question.
+- `INCLUDE_MARKET_PULSE`: `0` stops the Market Pulse forecasts (see below).
+- `PREDICTIONS_PER_QUESTION`: changes the number of samples per question.
+
+## Market Pulse
+
+The bot also enters the [Market Pulse Challenge](https://www.metaculus.com/tournament/market-pulse-26q4/), Metaculus's quarterly finance tournament. Bots are allowed in it, but each person can enter only once, either as a bot or as a human.
+
+- **Scoring:** only the forecast standing at each question's close counts. If a question resolves early, the forecast standing just before resolution counts.
+- **Forecasts:** the bot forecasts each question when it first sees it open. It updates the forecast once, during the last 12 hours before close (`MARKET_PULSE_REFRESH_HOURS`).
+- **Updating:** unlike FutureEval, updating forecasts is allowed and expected here. Updates are automatic, and each one posts its own private comment.
 
 ## Cost logging
 
