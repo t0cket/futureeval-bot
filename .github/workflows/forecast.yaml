@@ -43,7 +43,7 @@ jobs:
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
           INCLUDE_MINIBENCH: ${{ vars.INCLUDE_MINIBENCH || '0' }}
           INCLUDE_MARKET_PULSE: ${{ vars.INCLUDE_MARKET_PULSE || '1' }}
-          PREDICTIONS_PER_QUESTION: ${{ vars.PREDICTIONS_PER_QUESTION || '3' }}
+          PREDICTIONS_PER_QUESTION: ${{ vars.PREDICTIONS_PER_QUESTION || '2' }}
       - name: Keep forecast reports
         if: always()
         uses: actions/upload-artifact@v4

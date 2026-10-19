@@ -53,7 +53,9 @@ RESEARCH_MODEL = os.getenv("RESEARCH_MODEL", "openrouter/anthropic/claude-opus-5
 # into each research call ($0.30-0.49); 8 Exa results gave equally current, sourced briefs for ~$0.09.
 WEB_SEARCH_RESULTS = int(os.getenv("WEB_SEARCH_RESULTS", "8"))
 PARSER_MODEL = os.getenv("PARSER_MODEL", "openrouter/anthropic/claude-haiku-4.5")
-PREDICTIONS_PER_QUESTION = int(os.getenv("PREDICTIONS_PER_QUESTION", "3"))
+# 2 samples, not 3: the samples share one research report and came out nearly identical, so the
+# third added cost (~15%) but little information (D-023).
+PREDICTIONS_PER_QUESTION = int(os.getenv("PREDICTIONS_PER_QUESTION", "2"))
 # MiniBench pays ~$17 of prize pool per question vs ~$115-250 for Market Pulse and the seasonal
 # tournament, at the same cost per forecast, so it is off while we pay for credits (D-019).
 INCLUDE_MINIBENCH = os.getenv("INCLUDE_MINIBENCH", "0") == "1"
