@@ -14,6 +14,7 @@ Usage:
 import argparse
 import asyncio
 import logging
+import math
 import os
 import re
 import sys
@@ -33,11 +34,13 @@ from forecasting_tools import (  # noqa: E402  (env must be loaded first)
     MetaculusClient,
     MetaculusQuestion,
     MultipleChoiceQuestion,
+    NumericDistribution,
     NumericQuestion,
     PredictedOptionList,
     ReasonedPrediction,
     clean_indents,
 )
+from forecasting_tools.data_models.forecast_report import ResearchWithPredictions  # noqa: E402
 from forecasting_tools.forecast_bots.official_bots.template_bot_2026_fall import (  # noqa: E402
     FallTemplateBot2026,
 )
@@ -53,8 +56,8 @@ RESEARCH_MODEL = os.getenv("RESEARCH_MODEL", "openrouter/anthropic/claude-opus-5
 # into each research call ($0.30-0.49); 8 Exa results gave equally current, sourced briefs for ~$0.09.
 WEB_SEARCH_RESULTS = int(os.getenv("WEB_SEARCH_RESULTS", "8"))
 PARSER_MODEL = os.getenv("PARSER_MODEL", "openrouter/anthropic/claude-haiku-4.5")
-# 2 samples, not 3: the samples share one research report and came out nearly identical, so the
-# third added cost (~15%) but little information (D-023).
+# 2 samples, plus a third only when they disagree (D-023, D-024): the samples share one research
+# report and usually come out nearly identical.
 PREDICTIONS_PER_QUESTION = int(os.getenv("PREDICTIONS_PER_QUESTION", "2"))
 # MiniBench pays ~$17 of prize pool per question vs ~$115-250 for Market Pulse and the seasonal
 # tournament, at the same cost per forecast, so it is off while we pay for credits (D-019).
@@ -84,6 +87,22 @@ class CalibratedForecaster(FallTemplateBot2026):
 
     _max_concurrent_questions = 2
     _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)
+
+    async def _research_and_make_predictions(
+        self, question: MetaculusQuestion
+    ) -> ResearchWithPredictions:
+        # Two samples usually agree; a third breaks the tie only when they don't (D-024).
+        result = await super()._research_and_make_predictions(question)
+        values = [p.prediction_value for p in result.predictions]
+        if len(values) == 2 and samples_disagree(*values):
+            logger.info(f"Samples disagree on {question.page_url}; running a third")
+            try:
+                result.predictions.append(
+                    await self._make_prediction(question, result.research_report)
+                )
+            except Exception as e:
+                result.errors.append(f"Third sample failed: {type(e).__name__}: {e}")
+        return result
 
     async def run_research(self, question: MetaculusQuestion) -> str:
         sources = {
@@ -210,6 +229,39 @@ class CalibratedForecaster(FallTemplateBot2026):
             """
         )
         return await self._multiple_choice_prompt_to_forecast(question, prompt)
+
+
+def samples_disagree(a, b) -> bool:
+    """Whether two forecasts of one question differ enough to be worth a third sample."""
+    if isinstance(a, float) and isinstance(b, float):  # binary, clamped to [0.01, 0.99]
+        return abs(_logit(a) - _logit(b)) >= math.log(2)  # odds differ by 2x or more
+    if isinstance(a, PredictedOptionList) and isinstance(b, PredictedOptionList):
+        b_probs = {o.option_name: o.probability for o in b.predicted_options}
+        return any(
+            abs(o.probability - b_probs.get(o.option_name, 0.0)) >= 0.10
+            for o in a.predicted_options
+        )
+    if isinstance(a, NumericDistribution) and isinstance(b, NumericDistribution):
+        # Either median lies outside the other's 20th-80th percentile range.
+        return not (
+            _quantile(b, 0.2) <= _quantile(a, 0.5) <= _quantile(b, 0.8)
+            and _quantile(a, 0.2) <= _quantile(b, 0.5) <= _quantile(a, 0.8)
+        )
+    return False  # conditional and mixed types: keep the two samples
+
+
+def _logit(p: float) -> float:
+    return math.log(p / (1 - p))
+
+
+def _quantile(distribution: NumericDistribution, percentile: float) -> float:
+    points = sorted((p.percentile, p.value) for p in distribution.declared_percentiles)
+    if percentile <= points[0][0]:
+        return points[0][1]
+    for (p0, v0), (p1, v1) in zip(points, points[1:]):
+        if p0 <= percentile <= p1:
+            return v0 if p1 == p0 else v0 + (v1 - v0) * (percentile - p0) / (p1 - p0)
+    return points[-1][1]
 
 
 def _section_text(body: str | BaseException) -> str:

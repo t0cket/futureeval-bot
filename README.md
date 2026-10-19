@@ -10,8 +10,8 @@ For each new question:
    - **News:** AskNews latest and historical news summaries
    - **Web search:** Claude Opus 5.5 reading the top 8 Exa web-search results (via OpenRouter's web plugin), reporting the latest developments, scheduled events before the resolution date, base rates, and whether the question is already nearly settled
    - **Related public forecasts:** matching Polymarket and Manifold markets, with current prices, volume and close dates. Search queries are written by Claude Haiku 4.5. Manifold markets with fewer than 10 traders are dropped.
-2. **Forecast.** Claude Opus 5.5 at high effort writes 2 independent forecasts from the same research. The binary and multiple-choice prompts ask for the time left, the status-quo outcome, a base rate with its reference class, and what related markets say. A market is used only if it asks about the same event with compatible criteria and timing.
-3. **Aggregate.** The 2 forecasts are combined with the template's standard aggregation (median, which for 2 is their average, for binary questions), then posted with the reasoning as a private comment.
+2. **Forecast.** Claude Opus 5.5 at high effort writes 2 independent forecasts from the same research. If they disagree materially, it writes a third: for binary questions, odds 2× apart; for multiple choice, any option 10+ points apart; for numeric and date questions, either median outside the other's 20th–80th percentile range. The binary and multiple-choice prompts ask for the time left, the status-quo outcome, a base rate with its reference class, and what related markets say. A market is used only if it asks about the same event with compatible criteria and timing.
+3. **Aggregate.** The forecasts are combined with the template's standard aggregation (median for binary questions: the average of 2, or the middle of 3), then posted with the reasoning as a private comment.
 
 Numeric, date and conditional questions use the template's prompts with the same research.
 
