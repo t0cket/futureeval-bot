@@ -33,10 +33,10 @@ Numeric, date and conditional questions use the template's prompts with the same
    - If you use your own key, set a credit limit on it. Once less than $1 is left on the key's limit or the account balance, whichever is lower, the bot stops forecasting and fails the run, so GitHub emails you.
 3. **AskNews (optional, free)**
    - Sign up at my.asknews.app with your Metaculus email.
-   - Then email contact@asknews.app asking for the FutureEval bot allowance, and create a client ID and secret.
+   - Then email contact@asknews.app asking for the FutureEval bot allowance, and create an API key (or a client ID and secret).
 4. **GitHub**
    - Push this folder to a new **public** repository. Public repos get unlimited Actions minutes; the 20-minute schedule would exceed a private repo's free quota.
-   - Under Settings → Secrets and variables → Actions, add `METACULUS_TOKEN`, `OPENROUTER_API_KEY` and, if you have them, `ASKNEWS_CLIENT_ID` and `ASKNEWS_SECRET`.
+   - Under Settings → Secrets and variables → Actions, add `METACULUS_TOKEN`, `OPENROUTER_API_KEY` and, if you have AskNews, either `ASKNEWS_API_KEY` or both `ASKNEWS_CLIENT_ID` and `ASKNEWS_SECRET`.
 5. **Test**
    - Run Actions → Test bot → Run workflow (or `python bot.py --mode test` locally). It forecasts one open binary, one multiple-choice and one numeric question from `bot-testing-area`.
    - On Metaculus, use "Switch to bot account" to check that forecasts landed on the bot-testing-area questions.

@@ -69,7 +69,10 @@ INCLUDE_MARKET_PULSE = os.getenv("INCLUDE_MARKET_PULSE", "1") == "1"
 # forecast when it opens (in case it resolves early) and refreshed once in this final window.
 MARKET_PULSE_REFRESH_HOURS = float(os.getenv("MARKET_PULSE_REFRESH_HOURS", "12"))
 MIN_CREDITS_USD = float(os.getenv("MIN_CREDITS_USD", "1.0"))
-ASKNEWS_CONFIGURED = bool(os.getenv("ASKNEWS_CLIENT_ID") and os.getenv("ASKNEWS_SECRET"))
+# AskNews accepts an API key or an OAuth client ID and secret; the library reads either from the env.
+ASKNEWS_CONFIGURED = bool(
+    os.getenv("ASKNEWS_API_KEY") or (os.getenv("ASKNEWS_CLIENT_ID") and os.getenv("ASKNEWS_SECRET"))
+)
 
 TEST_TOURNAMENT = "bot-testing-area"
 # The test run forecasts one open question of each of these types, which covers both
