@@ -44,6 +44,9 @@ jobs:
           INCLUDE_MINIBENCH: ${{ vars.INCLUDE_MINIBENCH || '0' }}
           INCLUDE_MARKET_PULSE: ${{ vars.INCLUDE_MARKET_PULSE || '1' }}
           PREDICTIONS_PER_QUESTION: ${{ vars.PREDICTIONS_PER_QUESTION || '2' }}
+          # Empty means the default in bot.py; set a repository variable to switch models without a commit.
+          FORECAST_MODEL: ${{ vars.FORECAST_MODEL }}
+          RESEARCH_MODEL: ${{ vars.RESEARCH_MODEL }}
       - name: Keep forecast reports
         if: always()
         uses: actions/upload-artifact@v4

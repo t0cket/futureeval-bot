@@ -1,10 +1,11 @@
 """Forecasting bot for the Metaculus FutureEval bot tournaments.
 
-Builds on Metaculus's official Fall 2026 template bot and changes three things:
-1. Research combines AskNews, live web search and related prediction markets.
+Builds on Metaculus's official Fall 2026 template bot and changes four things:
+1. Research combines web search, related prediction markets and, if configured, AskNews.
 2. Forecasts come from Claude Opus 5.5 at high effort, several samples per question.
 3. Binary and multiple-choice prompts ask for a base rate and say how to weigh
    market prices.
+4. Numeric tails fade out beyond the outermost percentiles instead of dropping off a cliff.
 
 Usage:
     python bot.py                      # seasonal tournament + Market Pulse (+ MiniBench if INCLUDE_MINIBENCH=1)
@@ -36,6 +37,7 @@ from forecasting_tools import (  # noqa: E402  (env must be loaded first)
     MultipleChoiceQuestion,
     NumericDistribution,
     NumericQuestion,
+    Percentile,
     PredictedOptionList,
     ReasonedPrediction,
     clean_indents,
@@ -49,9 +51,9 @@ from public_forecasts import find_public_forecasts  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-FORECAST_MODEL = os.getenv("FORECAST_MODEL", "openrouter/anthropic/claude-opus-5.5")
+FORECAST_MODEL = os.getenv("FORECAST_MODEL") or "openrouter/anthropic/claude-opus-5.5"
 FORECAST_EFFORT = os.getenv("FORECAST_EFFORT", "high")
-RESEARCH_MODEL = os.getenv("RESEARCH_MODEL", "openrouter/anthropic/claude-opus-5.5")
+RESEARCH_MODEL = os.getenv("RESEARCH_MODEL") or "openrouter/anthropic/claude-opus-5.5"
 # Exa search via OpenRouter's web plugin. Anthropic's native search pulled 55-95k tokens of results
 # into each research call ($0.30-0.49); 8 Exa results gave equally current, sourced briefs for ~$0.09.
 WEB_SEARCH_RESULTS = int(os.getenv("WEB_SEARCH_RESULTS", "8"))
@@ -230,6 +232,70 @@ class CalibratedForecaster(FallTemplateBot2026):
         )
         return await self._multiple_choice_prompt_to_forecast(question, prompt)
 
+    async def _run_forecast_on_numeric(
+        self, question: NumericQuestion, research: str
+    ) -> ReasonedPrediction[NumericDistribution]:
+        forecast = await super()._run_forecast_on_numeric(question, research)
+        try:
+            reshaped = NumericDistribution.from_question(
+                decaying_tail_percentiles(
+                    forecast.prediction_value.declared_percentiles,
+                    lower_bound=question.lower_bound,
+                    upper_bound=question.upper_bound,
+                    open_lower_bound=question.open_lower_bound,
+                    open_upper_bound=question.open_upper_bound,
+                ),
+                question,
+            )
+            reshaped.get_cdf()  # the same validation the submission goes through
+        except Exception as e:  # keep the template's forecast if the reshaped one is invalid
+            logger.warning(f"Tail reshaping failed on {question.page_url}: {type(e).__name__}: {e}")
+            return forecast
+        return ReasonedPrediction(prediction_value=reshaped, reasoning=forecast.reasoning)
+
+
+def decaying_tail_percentiles(
+    percentiles: list[Percentile],
+    lower_bound: float,
+    upper_bound: float,
+    open_lower_bound: bool,
+    open_upper_bound: bool,
+) -> list[Percentile]:
+    """Add percentiles beyond the outermost declared ones so the tails decay.
+
+    The template spreads the mass beyond the 10th and 90th percentiles evenly out to the question's
+    bound, so the density drops off a cliff there: an outcome just past the 90th percentile gets
+    almost no probability (the -109.5 on question 45884). This keeps the template's totals (half of
+    each tail beyond an open bound, the rest inside the range) and only moves the in-range part:
+    half of it within one step of the outermost percentile, a quarter within the next step, and so
+    on, where a step is the distance between the two outermost declared percentiles.
+    """
+    points = sorted((p.percentile, p.value) for p in percentiles)
+    if len(points) < 2:
+        return percentiles
+    added: list[tuple[float, float]] = []
+
+    def add_side(edge: tuple[float, float], inner: tuple[float, float], bound: float, is_open: bool) -> None:
+        sign = 1 if edge[1] >= inner[1] else -1
+        step = abs(edge[1] - inner[1])
+        tail = min(edge[0], 1 - edge[0])
+        in_range = tail / 2 if is_open else tail
+        if not lower_bound < edge[1] < upper_bound or step <= 0 or (bound - edge[1]) * sign <= step:
+            return  # the outermost percentile is outside the range, or there is no room before the bound
+        mass = 0.0
+        for k in range(1, 5):
+            value = edge[1] + sign * k * step
+            if (bound - value) * sign <= step / 2:
+                break
+            mass += in_range / 2**k
+            added.append((edge[0] + sign * mass, value))
+        if is_open:
+            added.append((edge[0] + sign * in_range, bound))
+
+    add_side(points[-1], points[-2], upper_bound, open_upper_bound)
+    add_side(points[0], points[1], lower_bound, open_lower_bound)
+    return [Percentile(percentile=p, value=v) for p, v in sorted(points + added)]
+
 
 def samples_disagree(a, b) -> bool:
     """Whether two forecasts of one question differ enough to be worth a third sample."""
@@ -309,6 +375,25 @@ def openrouter_key_status() -> dict | None:
         return response.json()["data"]
     except requests.RequestException as e:  # a status check must not cost us a question window
         logger.warning(f"Could not read OpenRouter key status: {e}")
+        return None
+
+
+def openrouter_account_balance() -> float | None:
+    """Credit bought minus credit used on the whole OpenRouter account, or None if unavailable."""
+    key = os.getenv("OPENROUTER_API_KEY")
+    if not key:
+        return None
+    try:
+        response = requests.get(
+            "https://openrouter.ai/api/v1/credits",
+            headers={"Authorization": f"Bearer {key}"},
+            timeout=15,
+        )
+        response.raise_for_status()
+        data = response.json()["data"]
+        return data["total_credits"] - data["total_usage"]
+    except (requests.RequestException, KeyError, TypeError) as e:
+        logger.warning(f"Could not read OpenRouter account balance: {e}")
         return None
 
 
@@ -402,11 +487,18 @@ def main() -> None:
     if not os.getenv("METACULUS_TOKEN"):
         sys.exit("METACULUS_TOKEN is not set (see README.md)")
     key_before = openrouter_key_status()
-    remaining = (key_before or {}).get("limit_remaining")
-    logger.info(f"OpenRouter credit remaining on the key: {remaining}")
+    # The key's cap can sit above the credit actually bought, so check both and use the lower.
+    known = [
+        value
+        for value in ((key_before or {}).get("limit_remaining"), openrouter_account_balance())
+        if value is not None
+    ]
+    remaining = min(known) if known else None
+    logger.info(f"OpenRouter credit remaining (key cap or account balance, whichever is lower): {remaining}")
     if remaining is not None and remaining < MIN_CREDITS_USD:
-        logger.warning(f"Only ${remaining:.2f} of LLM credits left; skipping this run.")
-        return
+        # Exit non-zero so the run shows as failed and GitHub emails the owner; a quiet skip
+        # looks like a healthy bot while every question is being missed.
+        sys.exit(f"Only ${remaining:.2f} of LLM credits left; not forecasting.")
     litellm.callbacks.append(UsageLogger())
 
     client = MetaculusClient()

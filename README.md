@@ -6,14 +6,14 @@ A bot for the [Metaculus FutureEval](https://www.metaculus.com/futureeval/) bot 
 
 For each new question:
 
-1. **Research.** Three sources run in parallel:
-   - **News:** AskNews latest and historical news summaries
+1. **Research.** These sources run in parallel:
+   - **News:** AskNews latest and historical news summaries, only when the AskNews secrets are set (step 3 of Setup). Without them the section is left out.
    - **Web search:** Claude Opus 5.5 reading the top 8 Exa web-search results (via OpenRouter's web plugin), reporting the latest developments, scheduled events before the resolution date, base rates, and whether the question is already nearly settled
    - **Related public forecasts:** matching Polymarket and Manifold markets, with current prices, volume and close dates. Search queries are written by Claude Haiku 4.5. Manifold markets with fewer than 10 traders are dropped.
 2. **Forecast.** Claude Opus 5.5 at high effort writes 2 independent forecasts from the same research. If they disagree materially, it writes a third: for binary questions, odds 2× apart; for multiple choice, any option 10+ points apart; for numeric and date questions, either median outside the other's 20th–80th percentile range. The binary and multiple-choice prompts ask for the time left, the status-quo outcome, a base rate with its reference class, and what related markets say. A market is used only if it asks about the same event with compatible criteria and timing.
 3. **Aggregate.** The forecasts are combined with the template's standard aggregation (median for binary questions: the average of 2, or the middle of 3), then posted with the reasoning as a private comment.
 
-Numeric, date and conditional questions use the template's prompts with the same research.
+Numeric, date and conditional questions use the template's prompts with the same research. For numeric and discrete questions, the template spreads the probability beyond the 10th and 90th percentiles evenly out to the question's bounds, so an answer just past the forecast range gets almost none. The bot reshapes those tails to fade out gradually, keeping the same total probability in each tail.
 
 ## Rules this bot follows
 
@@ -30,7 +30,7 @@ Numeric, date and conditional questions use the template's prompts with the same
    - Fill in the [participation form](https://forms.gle/aQdYMq9Pisrf1v7d8). Its second section requests LLM credits.
 2. **OpenRouter**
    - Either use the key Metaculus sends after the form, or create your own key at openrouter.ai.
-   - If you use your own key, set a credit limit on it. The bot skips runs once less than $1 is left.
+   - If you use your own key, set a credit limit on it. Once less than $1 is left on the key's limit or the account balance, whichever is lower, the bot stops forecasting and fails the run, so GitHub emails you.
 3. **AskNews (optional, free)**
    - Sign up at my.asknews.app with your Metaculus email.
    - Then email contact@asknews.app asking for the FutureEval bot allowance, and create a client ID and secret.
@@ -46,6 +46,7 @@ Repository variables:
 - `INCLUDE_MINIBENCH`: `1` adds MiniBench. It is off by default, because it pays far less prize money per question.
 - `INCLUDE_MARKET_PULSE`: `0` stops the Market Pulse forecasts (see below).
 - `PREDICTIONS_PER_QUESTION`: changes the number of samples per question.
+- `FORECAST_MODEL`, `RESEARCH_MODEL`: switch the OpenRouter model without a commit, e.g. `openrouter/anthropic/claude-fable-5.2`. Empty means the default in `bot.py`.
 
 ## Market Pulse
 
