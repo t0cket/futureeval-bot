@@ -70,6 +70,9 @@ INCLUDE_MARKET_PULSE = os.getenv("INCLUDE_MARKET_PULSE", "1") == "1"
 MARKET_PULSE_REFRESH_HOURS = float(os.getenv("MARKET_PULSE_REFRESH_HOURS", "12"))
 MIN_CREDITS_USD = float(os.getenv("MIN_CREDITS_USD", "1.0"))
 # AskNews accepts an API key or an OAuth client ID and secret; the library reads either from the env.
+# AskNews returns 14-16 articles (25-30k characters), which tripled the forecast prompts and the
+# cost per question; the first articles carry most of the value (D-027).
+NEWS_MAX_CHARS = int(os.getenv("NEWS_MAX_CHARS", "12000"))
 ASKNEWS_CONFIGURED = bool(
     os.getenv("ASKNEWS_API_KEY") or (os.getenv("ASKNEWS_CLIENT_ID") and os.getenv("ASKNEWS_SECRET"))
 )
@@ -127,7 +130,8 @@ class CalibratedForecaster(FallTemplateBot2026):
         return research
 
     async def _news(self, question: MetaculusQuestion) -> str:
-        return await AskNewsSearcher().get_formatted_news_async(question.question_text)
+        news = await AskNewsSearcher().get_formatted_news_async(question.question_text)
+        return truncate_news(news, NEWS_MAX_CHARS)
 
     async def _web_research(self, question: MetaculusQuestion) -> str:
         prompt = clean_indents(
@@ -298,6 +302,21 @@ def decaying_tail_percentiles(
     add_side(points[-1], points[-2], upper_bound, open_upper_bound)
     add_side(points[0], points[1], lower_bound, open_lower_bound)
     return [Percentile(percentile=p, value=v) for p, v in sorted(points + added)]
+
+
+def truncate_news(news: str, max_chars: int) -> str:
+    """Keep whole articles from the start of AskNews's formatted news, up to max_chars."""
+    if len(news) <= max_chars:
+        return news
+    # Each article starts with its bold title on a line of its own.
+    parts = re.split(r"(?m)^(?=\*\*)", news)
+    kept, articles = parts[0], parts[1:]
+    count = 0
+    while count < len(articles) and len(kept) + len(articles[count]) <= max_chars:
+        kept += articles[count]
+        count += 1
+    dropped = len(articles) - count
+    return kept.rstrip() + f"\n\n({dropped} more articles left out for length.)"
 
 
 def samples_disagree(a, b) -> bool:
