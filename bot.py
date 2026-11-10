@@ -19,11 +19,12 @@ import math
 import os
 import re
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import dotenv
 import litellm
 import requests
+from asknews_sdk import AsyncAskNewsSDK
 from litellm.integrations.custom_logger import CustomLogger
 
 dotenv.load_dotenv()
@@ -71,8 +72,18 @@ MARKET_PULSE_REFRESH_HOURS = float(os.getenv("MARKET_PULSE_REFRESH_HOURS", "12")
 MIN_CREDITS_USD = float(os.getenv("MIN_CREDITS_USD", "1.0"))
 # AskNews accepts an API key or an OAuth client ID and secret; the library reads either from the env.
 # AskNews returns 14-16 articles (25-30k characters), which tripled the forecast prompts and the
-# cost per question; the first articles carry most of the value (D-027).
+# cost per question, so the news section is capped (D-027).
 NEWS_MAX_CHARS = int(os.getenv("NEWS_MAX_CHARS", "12000"))
+# AskNews searches: section title, API strategy, articles requested. The allowance is 1,000 calls a
+# month; a latest-news search counts as 1 call and an archive search as 5.
+NEWS_SEARCHES = {
+    "latest": ("Latest news (past 48 hours)", "latest news", 6),
+    "archive": ("Earlier coverage", "news knowledge", 10),
+}
+NEWS_SECONDS_BETWEEN_CALLS = 12  # the free tier allows 1 call per 10 seconds, across all questions
+NEWS_REPEAT_DAYS = 3  # similar headlines this close together count as one story
+NEWS_FAILURES: list[str] = []  # reported at the end of the run, so a dead news source gets noticed
+MARKET_PULSE_QUESTION_IDS: set[int] = set()
 ASKNEWS_CONFIGURED = bool(
     os.getenv("ASKNEWS_API_KEY") or (os.getenv("ASKNEWS_CLIENT_ID") and os.getenv("ASKNEWS_SECRET"))
 )
@@ -123,6 +134,8 @@ class CalibratedForecaster(FallTemplateBot2026):
             sources = {"News (AskNews)": self._news(question), **sources}
         async with self._concurrency_limiter:
             results = await asyncio.gather(*sources.values(), return_exceptions=True)
+        if ASKNEWS_CONFIGURED and isinstance(results[0], BaseException):
+            NEWS_FAILURES.append(f"{question.page_url}: {type(results[0]).__name__}: {results[0]}")
         research = "\n\n".join(
             f"## {title}\n{_section_text(body)}" for title, body in zip(sources, results)
         )
@@ -130,8 +143,11 @@ class CalibratedForecaster(FallTemplateBot2026):
         return research
 
     async def _news(self, question: MetaculusQuestion) -> str:
-        news = await AskNewsSearcher().get_formatted_news_async(question.question_text)
-        return truncate_news(news, NEWS_MAX_CHARS)
+        # Market Pulse questions are about market numbers over the next weeks: the last 48 hours
+        # matter and the archive adds little, so they skip the search that costs 5 calls.
+        market_pulse = question.id_of_question in MARKET_PULSE_QUESTION_IDS
+        searches = ("latest",) if market_pulse else ("latest", "archive")
+        return await fetch_news(question.question_text, searches, NEWS_MAX_CHARS)
 
     async def _web_research(self, question: MetaculusQuestion) -> str:
         prompt = clean_indents(
@@ -304,19 +320,92 @@ def decaying_tail_percentiles(
     return [Percentile(percentile=p, value=v) for p, v in sorted(points + added)]
 
 
-def truncate_news(news: str, max_chars: int) -> str:
-    """Keep whole articles from the start of AskNews's formatted news, up to max_chars."""
-    if len(news) <= max_chars:
-        return news
-    # Each article starts with its bold title on a line of its own.
-    parts = re.split(r"(?m)^(?=\*\*)", news)
-    kept, articles = parts[0], parts[1:]
-    count = 0
-    while count < len(articles) and len(kept) + len(articles[count]) <= max_chars:
-        kept += articles[count]
-        count += 1
-    dropped = len(articles) - count
-    return kept.rstrip() + f"\n\n({dropped} more articles left out for length.)"
+_news_lock = asyncio.Lock()
+
+
+async def fetch_news(query: str, searches: tuple[str, ...], max_chars: int) -> str:
+    """Run the given AskNews searches and return a mix of their articles within max_chars.
+
+    The library's own helper always runs both searches and lists every latest-news article first,
+    so a size cap on its output kept the past 48 hours and dropped the archive it had paid 5 calls for.
+    """
+    searcher = AskNewsSearcher()  # resolves the API key or the client ID and secret from the env
+    found: dict[str, list] = {}
+    error: Exception | None = None
+    async with AsyncAskNewsSDK(
+        client_id=searcher.client_id,
+        client_secret=searcher.client_secret,
+        api_key=searcher.api_key,
+        scopes={"news"},
+    ) as ask:
+        for name in searches:
+            _, strategy, n_articles = NEWS_SEARCHES[name]
+            async with _news_lock:  # questions run two at a time; space the calls across all of them
+                try:
+                    response = await ask.news.search_news(
+                        query=query,
+                        n_articles=n_articles,
+                        return_type="both",
+                        strategy=strategy,
+                        try_cache="1h",
+                    )
+                    found[name] = list(response.as_dicts or [])
+                except Exception as e:  # keep the other search's articles if only one fails
+                    logger.warning(f"AskNews {name} search failed: {type(e).__name__}: {e}")
+                    error = e
+                finally:
+                    await asyncio.sleep(NEWS_SECONDS_BETWEEN_CALLS)
+    if not found and error is not None:
+        raise error
+    return format_news(found, max_chars)
+
+
+def format_news(found: dict[str, list], max_chars: int) -> str:
+    """Pick articles in turn from each search, in the order AskNews returned them, until max_chars.
+
+    An article is skipped as a repeat when its title mostly matches one already picked and the two
+    were published within NEWS_REPEAT_DAYS of each other: the latest-news search often returns one
+    story from several outlets. Similar headlines months apart are different stories and are kept.
+    """
+    picked: dict[str, list[str]] = {name: [] for name in found}
+    titles: list[tuple[set[str], date]] = []
+    used = skipped = 0
+    queues = {name: list(articles) for name, articles in found.items()}
+    full = False
+    while any(queues.values()) and not full:
+        for name, queue in queues.items():
+            if not queue:
+                continue
+            article = queue.pop(0)
+            words = {w for w in re.findall(r"[a-z0-9]+", str(article.eng_title).lower()) if len(w) > 3}
+            if words and any(
+                len(words & seen) / len(words | seen) >= 0.5
+                and abs((article.pub_date.date() - published).days) <= NEWS_REPEAT_DAYS
+                for seen, published in titles
+            ):
+                skipped += 1
+                continue
+            text = (
+                f"**{article.eng_title}**\n{article.summary}\n"
+                f"Publish date: {article.pub_date:%B %d, %Y}\n"
+                f"Source:[{article.source_id}]({article.article_url})\n\n"
+            )
+            if used + len(text) > max_chars:
+                if used:
+                    skipped += 1 + sum(len(q) for q in queues.values())
+                    full = True
+                    break
+                text = text[:max_chars].rstrip() + "\n\n"  # one very long article: keep its start
+            titles.append((words, article.pub_date.date()))
+            picked[name].append(text)
+            used += len(text)
+    if not used:
+        return "No articles were found."
+    sections = [
+        f"{NEWS_SEARCHES[name][0]}:\n\n{''.join(texts)}" for name, texts in picked.items() if texts
+    ]
+    note = f"({skipped} more articles left out as repeats or for length.)" if skipped else ""
+    return ("".join(sections) + note).rstrip()
 
 
 def samples_disagree(a, b) -> bool:
@@ -493,6 +582,7 @@ def tournament_questions(client: MetaculusClient) -> list[MetaculusQuestion]:
             if market_pulse_due(question, now)
         ]
         logger.info(f"Market Pulse: {len(due)} questions due for a forecast or refresh")
+        MARKET_PULSE_QUESTION_IDS.update(question.id_of_question for question in due)
         questions += due
     return questions
 
@@ -541,6 +631,10 @@ def main() -> None:
             f"(key total ${key_after['usage']:.2f}, remaining {key_after.get('limit_remaining')})"
         )
     bot.log_report_summary(reports)  # raises if any question failed, so the run shows as failed
+    if NEWS_FAILURES:
+        # The forecasts above were still posted, without news. Fail the run so GitHub emails the
+        # owner: an empty wallet or a used-up allowance would otherwise go unnoticed.
+        sys.exit(f"AskNews failed on {len(NEWS_FAILURES)} question(s), first: {NEWS_FAILURES[0][:300]}")
 
 
 if __name__ == "__main__":

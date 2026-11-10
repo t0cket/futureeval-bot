@@ -28,3 +28,7 @@ jobs:
           ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
           ASKNEWS_API_KEY: ${{ secrets.ASKNEWS_API_KEY }}
+          # Test what runs live: the same variables as forecast.yaml.
+          PREDICTIONS_PER_QUESTION: ${{ vars.PREDICTIONS_PER_QUESTION || '2' }}
+          FORECAST_MODEL: ${{ vars.FORECAST_MODEL }}
+          RESEARCH_MODEL: ${{ vars.RESEARCH_MODEL }}
